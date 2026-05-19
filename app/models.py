@@ -18,7 +18,7 @@ def gen_uuid():
 # ─── Extensions ───────────────────────────────────────────────────────────────
 
 class Extension(Base):
-    __tablename__ = 'extensions'
+    __tablename__ = 'voip_extensions'
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
     ehr_user_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
@@ -68,7 +68,7 @@ class CallLeg(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
     call_id: Mapped[str] = mapped_column(String(36), ForeignKey('calls.id', ondelete='CASCADE'))
-    extension_id: Mapped[str] = mapped_column(String(36), ForeignKey('extensions.id'))
+    extension_id: Mapped[str] = mapped_column(String(36), ForeignKey('voip_extensions.id'))
     joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -81,7 +81,7 @@ class CallNote(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
     call_id: Mapped[str] = mapped_column(String(36), ForeignKey('calls.id', ondelete='CASCADE'), unique=True)
-    author_extension_id: Mapped[str] = mapped_column(String(36), ForeignKey('extensions.id'))
+    author_extension_id: Mapped[str] = mapped_column(String(36), ForeignKey('voip_extensions.id'))
     body: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -104,7 +104,7 @@ class Voicemail(Base):
     transcription: Mapped[str | None] = mapped_column(Text, nullable=True)
     listened: Mapped[bool] = mapped_column(Boolean, default=False)
     listened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    extension_id: Mapped[str] = mapped_column(String(36), ForeignKey('extensions.id'))
+    extension_id: Mapped[str] = mapped_column(String(36), ForeignKey('voip_extensions.id'))
     deleted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     __table_args__ = (Index('ix_voicemails_extension_listened', 'extension_id', 'listened'),)
@@ -121,7 +121,7 @@ class SmsThread(Base):
     last_message_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_message_body: Mapped[str] = mapped_column(Text, default='')
     unread_count: Mapped[int] = mapped_column(Integer, default=0)
-    assigned_to_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('extensions.id'), nullable=True)
+    assigned_to_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('voip_extensions.id'), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default='open')   # open / archived
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -139,7 +139,7 @@ class SmsMessage(Base):
     direction: Mapped[str] = mapped_column(String(10))    # inbound / outbound
     body: Mapped[str] = mapped_column(Text)
     sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    sent_by_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('extensions.id'), nullable=True)
+    sent_by_id: Mapped[str | None] = mapped_column(String(36), ForeignKey('voip_extensions.id'), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default='sent')   # sending / sent / delivered / failed
     voipms_message_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
 

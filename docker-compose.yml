@@ -94,6 +94,8 @@ services:
       - ./secrets:/secrets:ro
       # Share the writable extensions file with Asterisk
       - pjsip_extensions:/etc/asterisk/pjsip_extensions.conf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
