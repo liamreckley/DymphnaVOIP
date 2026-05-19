@@ -1,86 +1,193 @@
-"""Asterisk AMI client — call control + real-time event listener for CDR logging."""
+"""Asterisk AMI client — raw asyncio TCP, no panoramisk dependency."""
 import asyncio
 import logging
+import uuid
 from datetime import datetime, timezone
-from panoramisk import Manager
+from typing import AsyncIterator
+
 from ..config import settings
 
 log = logging.getLogger(__name__)
 
-_manager: Manager | None = None
+
+# ─── Raw AMI client ───────────────────────────────────────────────────────────
+
+class AmiClient:
+    """Minimal async AMI client over raw TCP."""
+
+    def __init__(self, host: str, port: int, username: str, secret: str):
+        self.host = host
+        self.port = port
+        self.username = username
+        self.secret = secret
+        self._reader: asyncio.StreamReader | None = None
+        self._writer: asyncio.StreamWriter | None = None
+        self._pending: dict[str, asyncio.Future] = {}
+        self._event_queue: asyncio.Queue = asyncio.Queue()
+        self._read_task: asyncio.Task | None = None
+        self.connected = False
+
+    async def connect(self) -> None:
+        self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+        # Read greeting line e.g. "Asterisk Call Manager/5.0.0"
+        await self._reader.readline()
+        self._read_task = asyncio.create_task(self._read_loop())
+        # Login
+        resp = await self.send_action({'Action': 'Login', 'Username': self.username, 'Secret': self.secret})
+        if resp.get('Response') != 'Success':
+            raise RuntimeError(f"AMI login failed: {resp.get('Message')}")
+        self.connected = True
+        log.info("AMI connected to %s:%s", self.host, self.port)
+
+    async def disconnect(self) -> None:
+        self.connected = False
+        if self._read_task:
+            self._read_task.cancel()
+        if self._writer:
+            try:
+                self._writer.close()
+                await self._writer.wait_closed()
+            except Exception:
+                pass
+
+    async def send_action(self, action: dict) -> dict:
+        action_id = action.get('ActionID', str(uuid.uuid4()))
+        action['ActionID'] = action_id
+
+        loop = asyncio.get_event_loop()
+        fut: asyncio.Future = loop.create_future()
+        self._pending[action_id] = fut
+
+        msg = ''.join(f'{k}: {v}\r\n' for k, v in action.items()) + '\r\n'
+        self._writer.write(msg.encode())
+        await self._writer.drain()
+
+        try:
+            return await asyncio.wait_for(fut, timeout=10)
+        except asyncio.TimeoutError:
+            self._pending.pop(action_id, None)
+            return {'Response': 'Timeout'}
+
+    async def events(self) -> AsyncIterator[dict]:
+        """Async generator yielding AMI events."""
+        while True:
+            event = await self._event_queue.get()
+            yield event
+
+    async def _read_loop(self) -> None:
+        """Background task: read AMI messages and dispatch."""
+        try:
+            while True:
+                msg = await self._read_message()
+                if not msg:
+                    break
+                action_id = msg.get('ActionID')
+                if 'Response' in msg and action_id and action_id in self._pending:
+                    fut = self._pending.pop(action_id)
+                    if not fut.done():
+                        fut.set_result(msg)
+                elif 'Event' in msg:
+                    await self._event_queue.put(msg)
+        except (asyncio.CancelledError, Exception) as exc:
+            log.debug("AMI read loop ended: %s", exc)
+            self.connected = False
+            # Fail all pending futures
+            for fut in self._pending.values():
+                if not fut.done():
+                    fut.set_exception(ConnectionError("AMI disconnected"))
+            self._pending.clear()
+
+    async def _read_message(self) -> dict:
+        """Read one AMI message (blank-line terminated key:value pairs)."""
+        data: dict = {}
+        while True:
+            line = await self._reader.readline()
+            if not line:
+                return data
+            line = line.decode('utf-8', errors='replace').rstrip('\r\n')
+            if line == '':
+                if data:
+                    return data
+            elif ': ' in line:
+                k, _, v = line.partition(': ')
+                data[k.strip()] = v.strip()
+        return data
+
+
+# ─── Singleton ────────────────────────────────────────────────────────────────
+
+_client: AmiClient | None = None
 _listener_task: asyncio.Task | None = None
 
 
-async def get_manager() -> Manager:
-    global _manager
-    if _manager is None or not _manager.connected:
-        _manager = Manager(
+async def get_client() -> AmiClient:
+    global _client
+    if _client is None or not _client.connected:
+        _client = AmiClient(
             host=settings.asterisk_host,
             port=settings.asterisk_port,
             username=settings.asterisk_username,
             secret=settings.asterisk_secret,
         )
-        await _manager.connect()
-    return _manager
+        await _client.connect()
+    return _client
 
 
 # ─── Call control ─────────────────────────────────────────────────────────────
 
 async def originate_call(extension_number: str, remote_number: str) -> dict:
-    """Dial remote_number and bridge to extension."""
-    mgr = await get_manager()
-    result = await mgr.send_action({
+    c = await get_client()
+    return await c.send_action({
         'Action': 'Originate',
         'Channel': f'PJSIP/{extension_number}',
         'Exten': remote_number,
         'Context': 'dymphna-outbound',
-        'Priority': 1,
+        'Priority': '1',
         'CallerID': f'Dymphna <{settings.voipms_did}>',
         'Async': 'true',
     })
-    return result
 
 
 async def hangup_channel(channel: str) -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({'Action': 'Hangup', 'Channel': channel})
+    c = await get_client()
+    return await c.send_action({'Action': 'Hangup', 'Channel': channel})
 
 
 async def hold_channel(channel: str) -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({'Action': 'Hold', 'Channel': channel})
+    c = await get_client()
+    return await c.send_action({'Action': 'Hold', 'Channel': channel})
 
 
 async def unhold_channel(channel: str) -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({'Action': 'Unhold', 'Channel': channel})
+    c = await get_client()
+    return await c.send_action({'Action': 'Unhold', 'Channel': channel})
 
 
 async def blind_transfer(channel: str, extension: str, context: str = 'dymphna-internal') -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({
+    c = await get_client()
+    return await c.send_action({
         'Action': 'Redirect',
         'Channel': channel,
         'Exten': extension,
         'Context': context,
-        'Priority': 1,
+        'Priority': '1',
     })
 
 
 async def attended_transfer(channel: str, extension: str) -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({
+    c = await get_client()
+    return await c.send_action({
         'Action': 'Atxfer',
         'Channel': channel,
         'Exten': extension,
         'Context': 'dymphna-internal',
-        'Priority': 1,
+        'Priority': '1',
     })
 
 
 async def park_call(channel: str, parker_channel: str) -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({
+    c = await get_client()
+    return await c.send_action({
         'Action': 'Park',
         'Channel': channel,
         'TimeoutChannel': parker_channel,
@@ -88,8 +195,8 @@ async def park_call(channel: str, parker_channel: str) -> dict:
 
 
 async def mute_channel(channel: str, direction: str = 'in') -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({
+    c = await get_client()
+    return await c.send_action({
         'Action': 'MuteAudio',
         'Channel': channel,
         'Direction': direction,
@@ -98,8 +205,8 @@ async def mute_channel(channel: str, direction: str = 'in') -> dict:
 
 
 async def unmute_channel(channel: str, direction: str = 'in') -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({
+    c = await get_client()
+    return await c.send_action({
         'Action': 'MuteAudio',
         'Channel': channel,
         'Direction': direction,
@@ -108,33 +215,37 @@ async def unmute_channel(channel: str, direction: str = 'in') -> dict:
 
 
 async def pickup_extension(target_extension: str) -> dict:
-    mgr = await get_manager()
-    return await mgr.send_action({
+    c = await get_client()
+    return await c.send_action({
         'Action': 'Pickup',
         'Channel': f'PJSIP/{target_extension}',
     })
 
 
 async def get_active_channels() -> list[dict]:
-    mgr = await get_manager()
-    result = await mgr.send_action({'Action': 'CoreShowChannels'})
+    c = await get_client()
+    result = await c.send_action({'Action': 'CoreShowChannels'})
     channels = []
-    for event in result:
-        if event.get('Event') == 'CoreShowChannel':
-            channels.append({
-                'channel': event.get('Channel'),
-                'caller_id': event.get('CallerIDNum'),
-                'state': event.get('ChannelState'),
-                'duration': event.get('Duration'),
-            })
+    if isinstance(result, list):
+        for event in result:
+            if event.get('Event') == 'CoreShowChannel':
+                channels.append({
+                    'channel': event.get('Channel'),
+                    'caller_id': event.get('CallerIDNum'),
+                    'state': event.get('ChannelState'),
+                    'duration': event.get('Duration'),
+                })
     return channels
 
 
-# ─── Real-time call event listener ────────────────────────────────────────────
-# Listens for Hangup events and writes Call CDR records to the DB.
+async def reload_pjsip() -> dict:
+    c = await get_client()
+    return await c.send_action({'Action': 'ModuleReload', 'Module': 'res_pjsip.so'})
+
+
+# ─── Real-time event listener (CDR logging) ───────────────────────────────────
 
 def _parse_duration(duration_str: str | None) -> int:
-    """Convert 'HH:MM:SS' duration string to seconds."""
     if not duration_str:
         return 0
     try:
@@ -147,18 +258,16 @@ def _parse_duration(duration_str: str | None) -> int:
 
 
 async def _handle_hangup(event: dict, db_factory) -> None:
-    """Persist a Call CDR when Asterisk fires a Hangup event."""
     from ..models import Call
     from sqlalchemy import select
 
-    unique_id: str = event.get('Uniqueid', '')
-    cause: str = event.get('Cause-txt', '')
-    channel: str = event.get('Channel', '')
-    caller_id_num: str = event.get('CallerIDNum', '')
-    caller_id_name: str = event.get('CallerIDName', '')
-    connected_line_num: str = event.get('ConnectedLineNum', '')
-    duration_str: str = event.get('Duration', '0')
-    context: str = event.get('Context', '')
+    unique_id = event.get('Uniqueid', '')
+    cause = event.get('Cause-txt', '')
+    caller_id_num = event.get('CallerIDNum', '')
+    caller_id_name = event.get('CallerIDName', '')
+    connected_line_num = event.get('ConnectedLineNum', '')
+    duration_str = event.get('Duration', '0')
+    context = event.get('Context', '')
 
     if not unique_id or context == 'dymphna-ivr':
         return
@@ -168,14 +277,11 @@ async def _handle_hangup(event: dict, db_factory) -> None:
     disposition = 'answered' if cause in ('Normal Clearing', '16') else 'missed'
 
     async with db_factory() as db:
-        # Skip duplicate (Asterisk fires Hangup for each leg)
         existing = await db.execute(select(Call).where(Call.asterisk_unique_id == unique_id))
         if existing.scalar_one_or_none():
             return
 
         now = datetime.now(timezone.utc)
-        duration = _parse_duration(duration_str)
-
         call = Call(
             asterisk_unique_id=unique_id,
             direction=direction,
@@ -184,30 +290,29 @@ async def _handle_hangup(event: dict, db_factory) -> None:
             started_at=now,
             answered_at=now if disposition == 'answered' else None,
             ended_at=now,
-            duration=duration,
+            duration=_parse_duration(duration_str),
             disposition=disposition,
         )
         db.add(call)
         await db.commit()
-        log.info("Logged call %s (%s, %s, %ds)", unique_id, direction, disposition, duration)
+        log.info("Logged call %s (%s, %s)", unique_id, direction, disposition)
 
 
 async def start_event_listener(db_factory) -> None:
-    """Connect to AMI and listen for Hangup events to log CDRs."""
     global _listener_task
 
     async def _run():
         while True:
             try:
-                mgr = await get_manager()
-                log.info("AMI event listener connected")
-
-                async for event in mgr:
+                c = await get_client()
+                log.info("AMI event listener started")
+                async for event in c.events():
                     if event.get('Event') == 'Hangup':
-                        asyncio.create_task(_handle_hangup(dict(event), db_factory))
-
+                        asyncio.create_task(_handle_hangup(event, db_factory))
             except Exception as exc:
-                log.warning("AMI event listener disconnected: %s — reconnecting in 5s", exc)
+                log.warning("AMI listener error: %s — reconnecting in 5s", exc)
+                global _client
+                _client = None
                 await asyncio.sleep(5)
 
     _listener_task = asyncio.create_task(_run())
