@@ -2,7 +2,32 @@ version: '3.9'
 
 services:
 
-  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  # ─── Nginx reverse proxy (SSL termination) ───────────────────────────────────
+  nginx-proxy:
+    image: nginxproxy/nginx-proxy:latest
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - nginx_certs:/etc/nginx/certs
+      - nginx_vhost:/etc/nginx/vhost.d
+      - nginx_html:/usr/share/nginx/html
+
+  # ─── Let's Encrypt auto-cert ─────────────────────────────────────────────────
+  acme-companion:
+    image: nginxproxy/acme-companion:latest
+    restart: unless-stopped
+    volumes_from:
+      - nginx-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - acme_data:/etc/acme.sh
+    environment:
+      DEFAULT_EMAIL: liam.reckley@gmail.com
+
+  # ─── PostgreSQL ──────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -12,30 +37,28 @@ services:
       POSTGRES_DB: dymphna_voip
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    ports:
-      - '5433:5432'
+    # Not exposed publicly — internal Docker network only
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U voip -d dymphna_voip']
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # ─── Redis ──────────────────────────────────────────────────────────────────
+  # ─── Redis ───────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     command: redis-server --save 60 1 --loglevel warning
     volumes:
       - redis_data:/data
-    ports:
-      - '6380:6379'
+    # Not exposed publicly — internal Docker network only
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 10s
       timeout: 3s
       retries: 5
 
-  # ─── Asterisk PBX ───────────────────────────────────────────────────────────
+  # ─── Asterisk PBX ────────────────────────────────────────────────────────────
   asterisk:
     build:
       context: .
@@ -53,7 +76,6 @@ services:
       - ./asterisk/features.conf:/etc/asterisk/features.conf:ro
       - asterisk_spool:/var/spool/asterisk
       - asterisk_sounds:/var/lib/asterisk/sounds/custom
-      # Writable extensions file — VoIP API writes here when provisioning extensions
       - pjsip_extensions:/etc/asterisk/pjsip_extensions.conf
     healthcheck:
       test: ['CMD', 'asterisk', '-rx', 'core show uptime']
@@ -61,14 +83,15 @@ services:
       timeout: 10s
       retries: 3
 
-  # ─── FastAPI VoIP service ────────────────────────────────────────────────────
+  # ─── FastAPI VoIP service ─────────────────────────────────────────────────────
   voip-api:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
-    ports:
-      - '8001:8001'
+    # No public port — traffic comes through nginx-proxy only
+    expose:
+      - '8001'
     environment:
       DATABASE_URL: postgresql+asyncpg://voip:voip@postgres:5432/dymphna_voip
       REDIS_URL: redis://redis:6379/0
@@ -88,11 +111,14 @@ services:
       APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-com.dymphna.counseling}
       FCM_SERVER_KEY: ${FCM_SERVER_KEY:-}
       CORS_ORIGINS: https://ehr.dymphnacounseling.com
-      # Writable path for dynamic pjsip extensions
       PJSIP_EXTENSIONS_PATH: /etc/asterisk/pjsip_extensions.conf
+      # nginx-proxy picks these up automatically
+      VIRTUAL_HOST: voip.dymphnacounseling.com
+      VIRTUAL_PORT: 8001
+      LETSENCRYPT_HOST: voip.dymphnacounseling.com
+      LETSENCRYPT_EMAIL: liam.reckley@gmail.com
     volumes:
       - ./secrets:/secrets:ro
-      # Share the writable extensions file with Asterisk
       - pjsip_extensions:/etc/asterisk/pjsip_extensions.conf
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -113,3 +139,7 @@ volumes:
   asterisk_spool:
   asterisk_sounds:
   pjsip_extensions:
+  nginx_certs:
+  nginx_vhost:
+  nginx_html:
+  acme_data:
