@@ -1,0 +1,113 @@
+version: '3.9'
+
+services:
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: voip
+      POSTGRES_PASSWORD: voip
+      POSTGRES_DB: dymphna_voip
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - '5433:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U voip -d dymphna_voip']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - '6380:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ─── Asterisk PBX ───────────────────────────────────────────────────────────
+  asterisk:
+    build:
+      context: .
+      dockerfile: asterisk.Dockerfile
+    restart: unless-stopped
+    network_mode: host      # VoIP requires direct UDP access for RTP media
+    environment:
+      VOIPMS_SIP_USERNAME: ${VOIPMS_SIP_USERNAME:-changeme}
+      VOIPMS_SIP_PASSWORD: ${VOIPMS_SIP_PASSWORD:-changeme}
+    volumes:
+      - ./asterisk/pjsip.conf.template:/etc/asterisk/pjsip.conf.template:ro
+      - ./asterisk/extensions.conf:/etc/asterisk/extensions.conf:ro
+      - ./asterisk/manager.conf:/etc/asterisk/manager.conf:ro
+      - ./asterisk/voicemail.conf:/etc/asterisk/voicemail.conf:ro
+      - ./asterisk/features.conf:/etc/asterisk/features.conf:ro
+      - asterisk_spool:/var/spool/asterisk
+      - asterisk_sounds:/var/lib/asterisk/sounds/custom
+      # Writable extensions file — VoIP API writes here when provisioning extensions
+      - pjsip_extensions:/etc/asterisk/pjsip_extensions.conf
+    healthcheck:
+      test: ['CMD', 'asterisk', '-rx', 'core show uptime']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── FastAPI VoIP service ────────────────────────────────────────────────────
+  voip-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - '8001:8001'
+    environment:
+      DATABASE_URL: postgresql+asyncpg://voip:voip@postgres:5432/dymphna_voip
+      REDIS_URL: redis://redis:6379/0
+      ASTERISK_HOST: host.docker.internal
+      ASTERISK_PORT: 5038
+      ASTERISK_USERNAME: dymphna_ami
+      ASTERISK_SECRET: ${ASTERISK_SECRET:-change-me}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      VOIPMS_API_USERNAME: ${VOIPMS_API_USERNAME:-}
+      VOIPMS_API_PASSWORD: ${VOIPMS_API_PASSWORD:-}
+      VOIPMS_DID: ${VOIPMS_DID:-}
+      VOIPMS_WEBHOOK_TOKEN: ${VOIPMS_WEBHOOK_TOKEN:-}
+      S3_BUCKET: ${S3_BUCKET:-dymphna-voip-recordings}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-com.dymphna.counseling}
+      FCM_SERVER_KEY: ${FCM_SERVER_KEY:-}
+      CORS_ORIGINS: https://ehr.dymphnacounseling.com
+      # Writable path for dynamic pjsip extensions
+      PJSIP_EXTENSIONS_PATH: /etc/asterisk/pjsip_extensions.conf
+    volumes:
+      - ./secrets:/secrets:ro
+      # Share the writable extensions file with Asterisk
+      - pjsip_extensions:/etc/asterisk/pjsip_extensions.conf
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'curl', '-f', 'http://localhost:8001/voip/health']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+  asterisk_spool:
+  asterisk_sounds:
+  pjsip_extensions:

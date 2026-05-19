@@ -1,0 +1,86 @@
+; ─── Dymphna PJSIP Configuration ──────────────────────────────────────────────
+; Template — envsubst replaces ${VOIPMS_SIP_USERNAME} and ${VOIPMS_SIP_PASSWORD}
+; at container startup via asterisk/entrypoint.sh
+
+; ─── Global transport ─────────────────────────────────────────────────────────
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+
+[transport-tcp]
+type=transport
+protocol=tcp
+bind=0.0.0.0:5060
+
+; ─── VoIP.ms SIP trunk ────────────────────────────────────────────────────────
+; Single DID with multi-channel — Asterisk handles concurrent calls natively
+; Create a SIP Sub-Account in VoIP.ms portal:
+;   Account → Sub Accounts → Add → Protocol: SIP, Auth: User+Pass
+;   Username will be something like: 12345678_dymphna
+;   Set the DID (9563323219) to route to this sub-account
+
+[voipms-auth]
+type=auth
+auth_type=userpass
+username=${VOIPMS_SIP_USERNAME}
+password=${VOIPMS_SIP_PASSWORD}
+
+[voipms-aor]
+type=aor
+contact=sip:voip.ms:5060
+qualify_frequency=30
+
+[voipms-registration]
+type=registration
+transport=transport-udp
+outbound_auth=voipms-auth
+server_uri=sip:voip.ms
+client_uri=sip:${VOIPMS_SIP_USERNAME}@voip.ms
+retry_interval=60
+expiration=3600
+
+[voipms]
+type=endpoint
+transport=transport-udp
+context=dymphna-inbound
+aors=voipms-aor
+auth=voipms-auth
+outbound_auth=voipms-auth
+allow=ulaw,alaw,g729,g722
+dtmf_mode=rfc4733
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+send_pai=yes
+; DID: 9563323219
+
+[voipms-identify]
+type=identify
+endpoint=voipms
+match=voip.ms
+
+; ─── Extension template ───────────────────────────────────────────────────────
+; Each staff member gets their own PJSIP endpoint.
+; Extensions are dynamically added to pjsip_extensions.conf by the VoIP backend.
+
+[ext-defaults](!)
+type=endpoint
+context=dymphna-internal
+allow=ulaw,g729,g722
+dtmf_mode=rfc4733
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+transport=transport-udp
+ice_support=yes
+max_contacts=5
+
+; ─── Dynamically provisioned extensions ──────────────────────────────────────
+; Written by the VoIP backend API when extensions are created.
+; Reload with: asterisk -rx "module reload res_pjsip.so"
+
+#include "pjsip_extensions.conf"

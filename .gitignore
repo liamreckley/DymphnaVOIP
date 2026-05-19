@@ -1,0 +1,11 @@
+.env
+secrets/
+# Generated at runtime from template
+asterisk/pjsip.conf
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+*.egg-info/
+.pytest_cache/
