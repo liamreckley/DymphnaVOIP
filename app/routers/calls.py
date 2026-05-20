@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
 from ..database import get_db
-from ..models import Call, CallNote, CallLeg
+from ..models import Call, CallNote, CallLeg, Extension as ExtModel
 from ..schemas import CallLogOut, CallNoteIn, HoldIn, TransferIn
 from ..auth import get_current_user, CurrentUser
 from ..services import asterisk
@@ -99,15 +99,31 @@ async def add_call_note(
 @router.post('/originate', status_code=201)
 async def originate_call(
     body: OriginateIn,
-    _: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
 ):
-    """Instruct Asterisk to dial to_number and bridge to from_extension."""
-    # Normalize: strip non-digits, ensure 10-digit NANP or 11-digit with country code
+    """Click-to-call: look up staff's forwarding number, then instruct Asterisk
+    to call their cell first and bridge to the client number."""
+
+    # Look up the calling staff member's extension to get their forwarding number
+    if current.extension_id:
+        result = await db.execute(select(ExtModel).where(ExtModel.id == current.extension_id))
+    else:
+        result = await db.execute(select(ExtModel).where(ExtModel.ehr_user_id == current.user_id))
+    ext = result.scalar_one_or_none()
+
+    if not ext or not ext.forwarding_number:
+        raise HTTPException(400, 'No forwarding number set on your extension. Ask an admin to add your cell number.')
+
+    # Normalize client number to 10 digits
     digits = ''.join(c for c in body.to_number if c.isdigit())
-    if len(digits) == 10:
-        digits = '1' + digits   # prepend US country code for VoIP.ms
-    result = await asterisk.originate_call(body.from_extension, digits)
-    return {'status': 'dialing', 'result': str(result)}
+    if len(digits) == 11 and digits.startswith('1'):
+        digits = digits[1:]
+    if len(digits) != 10:
+        raise HTTPException(400, 'Invalid phone number — must be a 10-digit US number')
+
+    result = await asterisk.originate_call(ext.forwarding_number, digits)
+    return {'status': 'dialing', 'message': f'Your phone will ring shortly. Answer to connect to {body.to_number}.'}
 
 
 # ─── Active call controls (AMI passthrough) ───────────────────────────────────

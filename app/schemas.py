@@ -12,6 +12,7 @@ class ExtensionOut(BaseModel):
     display_name: str
     voip_role: str
     staff_category: str | None
+    forwarding_number: str | None
     presence_status: str
     is_active: bool
 
@@ -24,6 +25,13 @@ class ExtensionCreate(BaseModel):
     display_name: str
     voip_role: str
     staff_category: str | None = None
+    forwarding_number: str | None = None   # staff cell for click-to-call
+
+
+class ExtensionUpdate(BaseModel):
+    forwarding_number: str | None = None
+    display_name: str | None = None
+    presence_status: str | None = None
 
 
 class PresenceUpdate(BaseModel):

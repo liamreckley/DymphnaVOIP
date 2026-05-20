@@ -27,6 +27,7 @@ class Extension(Base):
     voip_role: Mapped[str] = mapped_column(String(30))
     staff_category: Mapped[str | None] = mapped_column(String(30), nullable=True)
     sip_password: Mapped[str] = mapped_column(String(100))
+    forwarding_number: Mapped[str | None] = mapped_column(String(20), nullable=True)  # staff cell for click-to-call
     presence_status: Mapped[str] = mapped_column(String(20), default='offline')
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -135,11 +135,21 @@ async def get_client() -> AmiClient:
 
 # ─── Call control ─────────────────────────────────────────────────────────────
 
-async def originate_call(extension_number: str, remote_number: str) -> dict:
+async def originate_call(forwarding_number: str, remote_number: str) -> dict:
+    """Click-to-call: Asterisk calls staff's cell first, then bridges to remote_number.
+
+    Flow:
+      1. Asterisk dials forwarding_number (staff's cell) via VoIP.ms trunk
+      2. Staff answers — Asterisk dials remote_number and bridges both legs
+      3. Client sees practice DID as caller ID, not the staff member's cell
+    """
     c = await get_client()
+    fwd = ''.join(ch for ch in forwarding_number if ch.isdigit())
+    if fwd.startswith('1') and len(fwd) == 11:
+        fwd = fwd[1:]   # strip leading 1 — dymphna-outbound expects 10 digits
     return await c.send_action({
         'Action': 'Originate',
-        'Channel': f'PJSIP/{extension_number}',
+        'Channel': f'Local/{fwd}@dymphna-outbound',
         'Exten': remote_number,
         'Context': 'dymphna-outbound',
         'Priority': '1',

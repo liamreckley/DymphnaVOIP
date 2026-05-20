@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 from ..database import get_db
 from ..models import Extension as ExtModel
-from ..schemas import ExtensionOut, ExtensionCreate, PresenceUpdate
+from ..schemas import ExtensionOut, ExtensionCreate, ExtensionUpdate, PresenceUpdate
 from ..auth import get_current_user, require_admin, CurrentUser
 from ..services import pjsip_provisioner
 import secrets
@@ -74,6 +74,23 @@ async def delete_extension(
     await db.commit()
 
     await pjsip_provisioner.deprovision_extension(ext.extension_number)
+
+
+@router.patch('/me', status_code=204)
+async def update_my_extension(
+    body: ExtensionUpdate,
+    db: AsyncSession = Depends(get_db),
+    current: CurrentUser = Depends(get_current_user),
+):
+    """Staff can update their own forwarding number and display name."""
+    values = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not values:
+        return
+    if current.extension_id:
+        await db.execute(update(ExtModel).where(ExtModel.id == current.extension_id).values(**values))
+    else:
+        await db.execute(update(ExtModel).where(ExtModel.ehr_user_id == current.user_id).values(**values))
+    await db.commit()
 
 
 @router.patch('/me/presence', status_code=204)
