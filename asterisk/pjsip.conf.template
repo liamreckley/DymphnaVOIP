@@ -14,6 +14,13 @@ type=transport
 protocol=tcp
 bind=0.0.0.0:5060
 
+; WebRTC: SIP-over-secure-WebSocket. TLS is terminated by the built-in HTTP
+; server (see http.conf, port 8089). The mobile softphone registers via this.
+[transport-wss]
+type=transport
+protocol=wss
+bind=0.0.0.0
+
 ; ─── VoIP.ms SIP trunk ────────────────────────────────────────────────────────
 ; Single DID with multi-channel — Asterisk handles concurrent calls natively
 ; Create a SIP Sub-Account in VoIP.ms portal:
@@ -69,13 +76,17 @@ match=voip.ms
 [ext-defaults](!)
 type=endpoint
 context=dymphna-internal
-allow=ulaw,g729,g722
+; WebRTC softphone defaults. `webrtc=yes` enables DTLS-SRTP, ICE, rtcp-mux,
+; AVPF and media_use_received_transport in one shot (Asterisk 16+).
+webrtc=yes
+dtls_auto_generate_cert=yes
+allow=opus,ulaw,alaw
 dtmf_mode=rfc4733
 direct_media=no
 rtp_symmetric=yes
 force_rport=yes
 rewrite_contact=yes
-transport=transport-udp
+transport=transport-wss
 ice_support=yes
 max_contacts=5
 

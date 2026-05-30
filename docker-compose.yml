@@ -27,36 +27,23 @@ services:
     environment:
       DEFAULT_EMAIL: liam.reckley@gmail.com
 
-  # ─── PostgreSQL ──────────────────────────────────────────────────────────────
-  postgres:
-    image: postgres:16-alpine
+  # ─── Database: Cloud SQL Auth Proxy ───────────────────────────────────────────
+  # Postgres lives in the shared dymphna-infrastructure Cloud SQL instance. VoIP gets
+  # its OWN database (dymphna_voip) there, alongside Onboarding/EHR/Financials. This
+  # proxy exposes a local 5432 that tunnels to Cloud SQL using the VM's attached
+  # service account (grant it roles/cloudsql.client). Redis was unused — removed.
+  cloud-sql-proxy:
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.11.4
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: voip
-      POSTGRES_PASSWORD: voip
-      POSTGRES_DB: dymphna_voip
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    # Not exposed publicly — internal Docker network only
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U voip -d dymphna_voip']
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ─── Redis ───────────────────────────────────────────────────────────────────
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: redis-server --save 60 1 --loglevel warning
-    volumes:
-      - redis_data:/data
-    # Not exposed publicly — internal Docker network only
-    healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 10s
-      timeout: 3s
-      retries: 5
+    command:
+      - "--address=0.0.0.0"
+      - "--port=5432"
+      - "${INSTANCE_CONNECTION_NAME}"
+    expose:
+      - "5432"
+    # If the VM service-account (ADC via metadata) isn't usable, add a key instead:
+    #   command: [..., "--credentials-file=/secrets/cloudsql-sa.json"]
+    #   volumes: [ "./secrets:/secrets:ro" ]
 
   # ─── Asterisk PBX ────────────────────────────────────────────────────────────
   asterisk:
@@ -64,7 +51,10 @@ services:
       context: .
       dockerfile: asterisk.Dockerfile
     restart: unless-stopped
-    network_mode: host      # VoIP requires direct UDP access for RTP media
+    # VoIP needs direct UDP access for RTP media. With host networking the WebRTC
+    # listeners bind the host directly — open these on the GCP firewall:
+    #   tcp/8089 (wss), udp/10000-20000 (RTP), udp/5060 (voip.ms trunk).
+    network_mode: host
     environment:
       VOIPMS_SIP_USERNAME: ${VOIPMS_SIP_USERNAME:-changeme}
       VOIPMS_SIP_PASSWORD: ${VOIPMS_SIP_PASSWORD:-changeme}
@@ -74,6 +64,11 @@ services:
       - ./asterisk/manager.conf:/etc/asterisk/manager.conf:ro
       - ./asterisk/voicemail.conf:/etc/asterisk/voicemail.conf:ro
       - ./asterisk/features.conf:/etc/asterisk/features.conf:ro
+      - ./asterisk/http.conf:/etc/asterisk/http.conf:ro
+      - ./asterisk/rtp.conf:/etc/asterisk/rtp.conf:ro
+      # Reuse the Let's Encrypt cert that acme-companion issues for the API host
+      # (voip.dymphnacounseling.com) to terminate TLS for wss on :8089.
+      - nginx_certs:/etc/asterisk/keys:ro
       - asterisk_spool:/var/spool/asterisk
       - asterisk_sounds:/var/lib/asterisk/sounds/custom
       - pjsip_extensions:/etc/asterisk/pjsip_extensions.conf
@@ -93,8 +88,7 @@ services:
     expose:
       - '8001'
     environment:
-      DATABASE_URL: postgresql+asyncpg://voip:voip@postgres:5432/dymphna_voip
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL}
       ASTERISK_HOST: host.docker.internal
       ASTERISK_PORT: 5038
       ASTERISK_USERNAME: dymphna_ami
@@ -110,6 +104,13 @@ services:
       APNS_TEAM_ID: ${APNS_TEAM_ID:-}
       APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-com.dymphna.counseling}
       FCM_SERVER_KEY: ${FCM_SERVER_KEY:-}
+      SIP_WS_HOST: ${SIP_WS_HOST:-voip.dymphnacounseling.com}
+      SIP_WS_PORT: ${SIP_WS_PORT:-8089}
+      SIP_DOMAIN: ${SIP_DOMAIN:-voip.dymphnacounseling.com}
+      STUN_URL: ${STUN_URL:-stun:stun.l.google.com:19302}
+      TURN_URL: ${TURN_URL:-}
+      TURN_USERNAME: ${TURN_USERNAME:-}
+      TURN_PASSWORD: ${TURN_PASSWORD:-}
       CORS_ORIGINS: https://ehr.dymphnacounseling.com
       PJSIP_EXTENSIONS_PATH: /etc/asterisk/pjsip_extensions.conf
       # nginx-proxy picks these up automatically
@@ -123,10 +124,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      - cloud-sql-proxy
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:8001/voip/health']
       interval: 15s
@@ -134,8 +132,6 @@ services:
       retries: 5
 
 volumes:
-  postgres_data:
-  redis_data:
   asterisk_spool:
   asterisk_sounds:
   pjsip_extensions:

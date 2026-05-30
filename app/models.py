@@ -154,7 +154,7 @@ class PushToken(Base):
     __tablename__ = 'push_tokens'
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=gen_uuid)
-    extension_id: Mapped[str] = mapped_column(String(36), ForeignKey('extensions.id', ondelete='CASCADE'), index=True)
+    extension_id: Mapped[str] = mapped_column(String(36), ForeignKey('voip_extensions.id', ondelete='CASCADE'), index=True)
     platform: Mapped[str] = mapped_column(String(10))    # ios / android
     token: Mapped[str] = mapped_column(String(500), unique=True)
     is_voip_push: Mapped[bool] = mapped_column(Boolean, default=False)   # PushKit vs APNs

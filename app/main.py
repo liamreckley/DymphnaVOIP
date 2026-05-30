@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .database import engine, Base, AsyncSessionLocal
-from .routers import extensions, calls, voicemail, sms, presence, push, admin
+from .routers import extensions, calls, voicemail, presence, push, admin, sip
 from .services import asterisk
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
@@ -57,10 +57,10 @@ app.add_middleware(
 app.include_router(extensions.router)
 app.include_router(calls.router)
 app.include_router(voicemail.router)
-app.include_router(sms.router)
 app.include_router(presence.router)
 app.include_router(push.router)
 app.include_router(admin.router)
+app.include_router(sip.router)
 
 
 @app.get('/voip/health')

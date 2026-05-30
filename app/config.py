@@ -50,6 +50,18 @@ class Settings(BaseSettings):
     # FCM (Android push)
     fcm_server_key: str = ''
 
+    # ─── WebRTC softphone (SIP-over-WSS to Asterisk) ──────────────────────────
+    # Public host the mobile app registers to over secure WebSocket.
+    sip_ws_host: str = 'voip.dymphnacounseling.com'
+    sip_ws_port: int = 8089
+    sip_domain: str = 'voip.dymphnacounseling.com'
+    # ICE servers advertised to the app. STUN is always included; TURN is strongly
+    # recommended for reliable audio across cellular NAT (run a coturn server).
+    stun_url: str = 'stun:stun.l.google.com:19302'
+    turn_url: str = ''          # e.g. turn:turn.dymphnacounseling.com:3478
+    turn_username: str = ''
+    turn_password: str = ''
+
     # Allowed CORS origins (comma-separated)
     cors_origins: str = 'https://ehr.dymphnacounseling.com'
 
