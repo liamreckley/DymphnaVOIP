@@ -1,111 +1,100 @@
 # Deploying the Dymphna VoIP backend (GCP)
 
-First-time provisioning of the VoIP/Asterisk stack on the **`dymphna-voip`** VM in the
-**`dymphna-infrastructure`** GCP project. Run the `gcloud` commands from Google Cloud
-Shell (easiest — no install) or any machine with `gcloud` authed to the project.
+This reflects the **validated** deploy on the `dymphna` VM in the `dymphna-infrastructure`
+project (Asterisk + FastAPI + nginx/Let's Encrypt, talking to the shared Cloud SQL).
+Run `gcloud` from **Cloud Shell** (you're the project owner there — the VM's own service
+account has limited scopes and will deny these).
 
 ```bash
 gcloud config set project dymphna-infrastructure
-ZONE=$(gcloud compute instances list --filter="name=dymphna-voip" --format="value(zone)")
-REGION=${ZONE%-*}
-echo "Zone=$ZONE  Region=$REGION"
+ZONE=us-central1-a            # the dymphna VM's zone
 ```
 
 ## What you provide
-- **voip.ms**: SIP sub-account username/password + a DID. ✅ (you have this)
-- **EHR secret**: the EHR's `NEXTAUTH_SECRET` (64 chars, confirmed in `Dymphna EHR/.env`) →
-  becomes `JWT_SECRET` on the VM so app login tokens validate.
-- **DNS control** for `dymphnacounseling.com` (to add a `voip.` record).
+- **voip.ms**: SIP sub-account user/pass + a DID.
+- **EHR secret**: the EHR's `NEXTAUTH_SECRET` → `JWT_SECRET` (so app login tokens validate).
+- **DNS** for `dymphnacounseling.com` (to point `voip.` at the VM).
 
----
-
-## 1. Static IP + DNS  (do first — DNS propagation takes time)
+## 1. Static IP + DNS  (DNS first — it propagates)
 ```bash
-gcloud compute addresses create dymphna-voip-ip --region="$REGION"
-IP=$(gcloud compute addresses describe dymphna-voip-ip --region="$REGION" --format="value(address)")
+# Promote the VM's current IP to static (no downtime):
+IP=$(gcloud compute instances describe dymphna --zone="$ZONE" --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
+gcloud compute addresses create dymphna-ip --addresses="$IP" --region="${ZONE%-*}"
 echo "Static IP: $IP"
-
-# Swap the VM's ephemeral IP for the static one
-gcloud compute instances delete-access-config dymphna-voip --zone="$ZONE" --access-config-name="External NAT"
-gcloud compute instances add-access-config    dymphna-voip --zone="$ZONE" --access-config-name="External NAT" --address="$IP"
 ```
-Then create an **A record** `voip.dymphnacounseling.com → $IP` wherever you manage
-`dymphnacounseling.com` DNS (same place the `ehr.` record lives). Verify:
-`dig +short voip.dymphnacounseling.com` returns `$IP`.
+Create an **A record** `voip.dymphnacounseling.com → $IP`. Verify: `dig +short voip.dymphnacounseling.com`.
 
 ## 2. Firewall
 ```bash
-gcloud compute instances add-tags dymphna-voip --zone="$ZONE" --tags=dymphna-voip
-gcloud compute firewall-rules create dymphna-voip-web --allow=tcp:80,tcp:443 --target-tags=dymphna-voip --source-ranges=0.0.0.0/0
-gcloud compute firewall-rules create dymphna-voip-wss --allow=tcp:8089        --target-tags=dymphna-voip --source-ranges=0.0.0.0/0
-gcloud compute firewall-rules create dymphna-voip-rtp --allow=udp:10000-20000 --target-tags=dymphna-voip --source-ranges=0.0.0.0/0
-# voip.ms trunk. Safer: restrict --source-ranges to voip.ms server IPs instead of 0.0.0.0/0.
-gcloud compute firewall-rules create dymphna-voip-sip --allow=udp:5060        --target-tags=dymphna-voip --source-ranges=0.0.0.0/0
+gcloud compute instances add-tags dymphna --zone="$ZONE" --tags=dymphna-voip
+gcloud compute firewall-rules create dymphna-voip-web --allow=tcp:80,tcp:443      --target-tags=dymphna-voip --source-ranges=0.0.0.0/0
+gcloud compute firewall-rules create dymphna-voip-wss --allow=tcp:8089            --target-tags=dymphna-voip --source-ranges=0.0.0.0/0
+gcloud compute firewall-rules create dymphna-voip-rtp --allow=udp:10000-20000     --target-tags=dymphna-voip --source-ranges=0.0.0.0/0
+# voip.ms trunk — HARDEN: restrict --source-ranges to voip.ms server IPs, not 0.0.0.0/0
+gcloud compute firewall-rules create dymphna-voip-sip --allow=udp:5060            --target-tags=dymphna-voip --source-ranges=0.0.0.0/0
 ```
 
 ## 3. Cloud SQL: VoIP's own database
+The shared instance is `dymphna-infrastructure` (Postgres 15). Note its **PRIVATE_ADDRESS** —
+the VM connects to it directly over the VPC (no proxy needed):
 ```bash
-gcloud services enable sqladmin.googleapis.com
-INSTANCE=$(gcloud sql instances list --format="value(name)" | head -1)   # or set explicitly
-CONN=$(gcloud sql instances describe "$INSTANCE" --format="value(connectionName)")
-echo "Instance=$INSTANCE  ConnectionName=$CONN"
-
-gcloud sql users     create voip          --instance="$INSTANCE" --password='CHOOSE_A_STRONG_PASSWORD'
-gcloud sql databases create dymphna_voip  --instance="$INSTANCE"
-# then grant (PG15+): connect to dymphna_voip as an admin and run scripts/infra-db-setup.sql
+gcloud sql instances list   # note PRIVATE_ADDRESS (e.g. 10.24.208.6)
+gcloud sql users     create voip          --instance=dymphna-infrastructure --password='STRONG_PW'
+gcloud sql databases create dymphna_voip  --instance=dymphna-infrastructure
 ```
-
-Let the proxy authenticate as the VM's service account:
-```bash
-SA=$(gcloud compute instances describe dymphna-voip --zone="$ZONE" --format="value(serviceAccounts[0].email)")
-gcloud projects add-iam-policy-binding dymphna-infrastructure --member="serviceAccount:$SA" --role="roles/cloudsql.client"
+Then make `voip` own its DB so it can create tables (PG15). Easiest from the VM once psql is
+installed (`sudo apt-get install -y postgresql-client`), connecting as `postgres`:
+```sql
+GRANT voip TO postgres;
+ALTER DATABASE dymphna_voip OWNER TO voip;
 ```
+> We do **not** use the Cloud SQL Auth Proxy: it needs the VM to have the `cloud-platform`
+> access scope, which the default scopes lack (`ACCESS_TOKEN_SCOPE_INSUFFICIENT`). Direct
+> private-IP is simpler and stays on the VPC.
 
-## 4. Code + secrets on the VM
+## 4. Code + `.env` on the VM
 ```bash
-gcloud compute ssh dymphna-voip --zone="$ZONE"
+gcloud compute ssh dymphna --zone="$ZONE"     # or the Console "SSH" button
 # --- on the VM ---
-git clone https://github.com/liamreckley/DymphnaVOIP.git
-cd DymphnaVOIP
-cp .env.example .env
-nano .env     # fill in:
-#   INSTANCE_CONNECTION_NAME = <CONN from step 3>
-#   DATABASE_URL = postgresql+asyncpg://voip:<password>@cloud-sql-proxy:5432/dymphna_voip
+sudo apt-get install -y git
+git clone https://github.com/liamreckley/DymphnaVOIP.git && cd DymphnaVOIP
+cp .env.example .env && nano .env             # fill in:
+#   DATABASE_URL = postgresql+asyncpg://voip:STRONG_PW@<PRIVATE_ADDRESS>:5432/dymphna_voip
 #   JWT_SECRET   = <EHR NEXTAUTH_SECRET>
-#   VOIPMS_SIP_USERNAME / VOIPMS_SIP_PASSWORD / VOIPMS_DID  (+ VOIPMS_API_* if used)
-#   LETSENCRYPT_HOST / VIRTUAL_HOST already default to voip.dymphnacounseling.com
+#   ASTERISK_SECRET = <any strong value>      (Asterisk + API share this one)
+#   VOIPMS_SIP_USERNAME / VOIPMS_SIP_PASSWORD / VOIPMS_DID
 ```
-> Use a fresh GitHub token or a deploy key to clone — **not** the one currently embedded
-> in the repo's git config (rotate that; it's exposed).
 
 ## 5. Bring it up
 ```bash
-./scripts/vm-setup.sh          # installs Docker + compose, then docker compose up -d --build
-sudo docker compose logs -f acme-companion   # watch the TLS cert issue (needs DNS + :80 live)
+bash scripts/vm-setup.sh                       # installs Docker, builds, starts
+sudo docker compose logs -f acme-companion     # watch the TLS cert issue
 ```
 
-## 6. Validate
+## 6. Validate (from anywhere)
 ```bash
-sudo docker compose ps                                              # all services Up
-sudo docker compose exec asterisk asterisk -rx "http show status"   # TLS @ 0.0.0.0:8089
+curl https://voip.dymphnacounseling.com/voip/health        # {"status":"ok",...}
 sudo docker compose exec asterisk asterisk -rx "pjsip show transports"   # transport-wss present
-curl https://voip.dymphnacounseling.com/voip/health                 # {"status":"ok"}
-# from your laptop — wss reachable:
-npx wscat -c "wss://voip.dymphnacounseling.com:8089/ws"
+sudo docker compose exec asterisk asterisk -rx "manager show connected"  # AMI auth OK (no errors)
+# externally: the wss port answers an upgrade
+curl -o /dev/null -w "%{http_code}\n" https://voip.dymphnacounseling.com:8089/ws   # 426
 ```
-If `http show status` shows no TLS: check the cert mounted readable at
-`sudo docker compose exec asterisk ls -l /etc/asterisk/keys/`.
 
 ## 7. voip.ms trunk (for real calls)
-In the voip.ms portal: point your **DID → the SIP sub-account** used in `.env`, and confirm
-the trunk registers: `sudo docker compose exec asterisk asterisk -rx "pjsip show registrations"`.
+Point your **DID → the SIP sub-account** in `.env`, then check it registered:
+`sudo docker compose exec asterisk asterisk -rx "pjsip show registrations"`.
 
 ---
 
-### Notes
-- **Cert renewal**: acme-companion auto-renews; Asterisk picks up the new cert on restart —
-  a monthly `docker compose restart asterisk` (cron) is enough.
-- **TURN**: for reliable audio on cellular, run coturn and set `TURN_URL/USERNAME/PASSWORD`
-  in `.env` — they flow to the app automatically via `/voip/sip/credentials`.
-- **Extensions**: created per counselor via the API (`POST /voip/extensions`) once the EHR
-  can issue an admin `voip_token` — that's the next milestone after this is up.
+## Gotchas we hit (so you don't again)
+- **Run gcloud admin commands in Cloud Shell**, not on the VM (the VM's service account is
+  scope-limited and denies stop/start/set-service-account).
+- **Asterisk image is `andrius/asterisk:22`** (Debian) — there is no `:22-alpine`.
+- **Cloud SQL `postgres` isn't a true superuser** — `CREATE DATABASE ... OWNER voip` needs
+  `GRANT voip TO postgres` first.
+- **If table creation errors with "voip_extensions already exists"** from a half-finished run:
+  wipe + rebuild — `psql ... -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public AUTHORIZATION voip;"`
+  then `docker compose up -d voip-api`.
+- Per-extension PJSIP config is a **directory-mounted volume** (`/etc/asterisk/pjsip_ext`);
+  mounting a named volume onto a single file path silently turns it into a directory and breaks
+  the `#include`.

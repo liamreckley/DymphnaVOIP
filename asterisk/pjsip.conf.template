@@ -94,4 +94,4 @@ max_contacts=5
 ; Written by the VoIP backend API when extensions are created.
 ; Reload with: asterisk -rx "module reload res_pjsip.so"
 
-#include "pjsip_extensions.conf"
+#include "pjsip_ext/pjsip_extensions.conf"

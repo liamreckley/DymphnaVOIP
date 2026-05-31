@@ -20,8 +20,8 @@ class Settings(BaseSettings):
     asterisk_username: str = 'dymphna_ami'
     asterisk_secret: str = 'change-me'
 
-    # Asterisk dynamic extension config (writable path)
-    pjsip_extensions_path: str = '/etc/asterisk/pjsip_extensions.conf'
+    # Asterisk dynamic extension config (writable path, directory-mounted volume)
+    pjsip_extensions_path: str = '/etc/asterisk/pjsip_ext/pjsip_extensions.conf'
 
     # VoIP.ms REST API
     voipms_api_username: str = ''
